@@ -1071,8 +1071,8 @@ class ShuttleCore(tile: ShuttleTile, edge: TLEdgeOut)(implicit p: Parameters) ex
     val sel = com_uops_reg.map(u => u.valid && u.bits.ctrl.mem)
     io.vector.get.com.scalar_check.valid := sel.orR
     io.vector.get.com.scalar_check.bits.addr := RegEnable(dtlb.io.resp.last.paddr, mem_uops_reg.map(_.valid).orR)
-    io.vector.get.com.scalar_check.bits.size := Mux1H(sel, mem_uops_reg.map(_.bits.mem_size))
-    io.vector.get.com.scalar_check.bits.store := isWrite(Mux1H(sel, mem_uops_reg.map(_.bits.ctrl.mem_cmd)))
+    io.vector.get.com.scalar_check.bits.size := Mux1H(sel, com_uops_reg.map(_.bits.mem_size))
+    io.vector.get.com.scalar_check.bits.store := isWrite(Mux1H(sel, com_uops_reg.map(_.bits.ctrl.mem_cmd)))
     for (i <- 0 until retireWidth) {
       when (io.vector.get.com.scalar_check.valid && !io.vector.get.com.scalar_check.ready && com_uops_reg(i).bits.ctrl.mem) {
         com_uops(i).bits.needs_replay := true.B
