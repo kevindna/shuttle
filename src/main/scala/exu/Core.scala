@@ -562,7 +562,13 @@ class ShuttleCore(tile: ShuttleTile, edge: TLEdgeOut)(implicit p: Parameters) ex
       fp_pipe.io.fcsr_rm := csr.io.fcsr_rm
     }
   }
-  val ex_fcsr_data_hazard = ex_uops_reg(0).valid && ex_uops_reg(0).bits.csr_en && (fsboard_bsy || mem_bsy || com_bsy)
+  // fflags / fcsr also wait for the vector unit: its FP flags (vector FP,
+  // the Saturn OPU) arrive through io.vector.set_fflags after the instruction
+  // has left this pipeline
+  val ex_fcsr_addr = ex_uops_reg(0).bits.inst(31, 20)
+  val ex_fflags_vec_hazard = (ex_fcsr_addr === CSRs.fflags.U || ex_fcsr_addr === CSRs.fcsr.U) &&
+    io.vector.map(v => v.backend_busy || v.trap_check_busy).getOrElse(false.B)
+  val ex_fcsr_data_hazard = ex_uops_reg(0).valid && ex_uops_reg(0).bits.csr_en && (fsboard_bsy || mem_bsy || com_bsy || ex_fflags_vec_hazard)
 
   val ex_setvcfg_valid = ex_uops_reg.map(r => r.valid && r.bits.sets_vcfg)
   val ex_setvcfg_uop = Mux1H(ex_setvcfg_valid, ex_uops_reg).bits
