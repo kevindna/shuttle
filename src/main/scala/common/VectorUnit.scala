@@ -29,6 +29,7 @@ class ShuttleVectorCoreIO(implicit p: Parameters) extends CoreBundle()(p) {
     val valid = Input(Bool())
     val uop = Input(new ShuttleUOP)
     val vconfig = Input(new VConfig)
+    val mtype = Input(new ZvtMType) // Zvt (0 without)
     val vstart = Input(UInt(log2Ceil(maxVLMax).W))
     val ready = Output(Bool())
     val fire = Input(Bool())

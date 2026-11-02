@@ -16,10 +16,25 @@ import shuttle.ifu._
 import shuttle.util._
 import shuttle.dmem.{ShuttleDCacheIO, ShuttleDTLB}
 
-class ShuttleCustomCSRs(implicit p: Parameters) extends freechips.rocketchip.tile.CustomCSRs {
+class ShuttleCustomCSRs(zvt: Boolean = false)(implicit p: Parameters) extends freechips.rocketchip.tile.CustomCSRs {
   def marchid = CustomCSR.constant(CSRs.marchid, BigInt(34))
+  // Zvt mtype (read-only: written by the configuration instructions through set)
+  def mtype = CustomCSR(ZvtMType.csrAddr, BigInt("fffce3", 16), Some(BigInt(0))) // tm [23:10], tk [7:5], mtwiden [1:0]
 
   override def decls: Seq[CustomCSR] = super.decls :+ marchid
+  def declsZvt: Seq[CustomCSR] = decls ++ (if (zvt) Seq(mtype) else Nil)
+}
+
+// Zvt configuration instructions and vtdiscard (Shuttle executes them, like vsetvl)
+class ZvtDecode(implicit val p: Parameters) extends DecodeConstants
+{
+  val table: Array[(BitPat, List[BitPat])] = Array(
+    Zvt.MSETTN     -> List(Y,N,N,N,N,N,N,Y,A2_X,   A1_X,   IMM_X, DW_X,  FN_X,     N,M_X,        N,N,N,N,N,N,Y,CSR.N,N,N,N,N),
+    Zvt.MSETTM     -> List(Y,N,N,N,N,N,N,Y,A2_X,   A1_X,   IMM_X, DW_X,  FN_X,     N,M_X,        N,N,N,N,N,N,Y,CSR.N,N,N,N,N),
+    Zvt.MSETTK     -> List(Y,N,N,N,N,N,N,Y,A2_X,   A1_X,   IMM_X, DW_X,  FN_X,     N,M_X,        N,N,N,N,N,N,Y,CSR.N,N,N,N,N),
+    Zvt.MSETMTYPEI -> List(Y,N,N,N,N,N,N,N,A2_X,   A1_X,   IMM_X, DW_X,  FN_X,     N,M_X,        N,N,N,N,N,N,N,CSR.N,N,N,N,N),
+    Zvt.MSETMTYPE  -> List(Y,N,N,N,N,N,Y,Y,A2_X,   A1_X,   IMM_X, DW_X,  FN_X,     N,M_X,        N,N,N,N,N,N,N,CSR.N,N,N,N,N),
+    Zvt.VTDISCARD  -> List(Y,N,N,N,N,N,N,N,A2_X,   A1_X,   IMM_X, DW_X,  FN_X,     N,M_X,        N,N,N,N,N,N,N,CSR.N,N,N,N,N))
 }
 
 
@@ -56,7 +71,10 @@ class ShuttleCore(tile: ShuttleTile, edge: TLEdgeOut)(implicit p: Parameters) ex
 
   // EventSet can't handle empty
   val events = new EventSets(Seq(new EventSet((mask, hit) => false.B, Seq(("placeholder", () => false.B)))))
-  val csr = Module(new CSRFile(events, (new ShuttleCustomCSRs).decls, tile.roccCSRs.flatten))
+  val zvtTE = shuttleParams.vector.flatMap(_.zvtTE)
+  val usingZvt = zvtTE.isDefined
+  val customCSRDecls = (new ShuttleCustomCSRs(usingZvt)).declsZvt
+  val csr = Module(new CSRFile(events, customCSRDecls, tile.roccCSRs.flatten))
   csr.io := DontCare
   csr.io.customCSRs.foreach { c => c.set := false.B; c.sdata := DontCare }
   csr.io.ungated_clock := clock
@@ -88,6 +106,15 @@ class ShuttleCore(tile: ShuttleTile, edge: TLEdgeOut)(implicit p: Parameters) ex
   val com_vcfg = usingVector.option(Reg(Valid(new VConfig)))
   val rrd_vcfg = usingVector.option((ex_vcfg_out ++ mem_vcfg ++ com_vcfg)
     .foldRight(csr.io.vector.get.vconfig)((a, b) => Mux(a.valid, a.bits, b)))
+  // Zvt mtype, carried alongside vcfg (same valids); committed in the mtype custom CSR
+  val mtypeCSR = Option.when(usingZvt)(csr.io.customCSRs(customCSRDecls.indexWhere(_.id == ZvtMType.csrAddr)))
+  val csr_mtype = mtypeCSR.map(c => ZvtMType.fromCSR(c.value)).getOrElse(0.U.asTypeOf(new ZvtMType))
+  val ex_mtype = Reg(new ZvtMType)
+  val ex_mtype_out = WireInit(ex_mtype)
+  val mem_mtype = Reg(new ZvtMType)
+  val com_mtype = Reg(new ZvtMType)
+  val rrd_mtype = if (usingVector) Mux(ex_vcfg.get.valid, ex_mtype_out, Mux(mem_vcfg.get.valid, mem_mtype,
+    Mux(com_vcfg.get.valid, com_mtype, csr_mtype))) else csr_mtype
 
   class Bypass extends Bundle {
     val valid = Bool()
@@ -146,13 +173,14 @@ class ShuttleCore(tile: ShuttleTile, edge: TLEdgeOut)(implicit p: Parameters) ex
     when (!ex_stall) {
       ex_vcfg.get.valid := (0 until retireWidth).map { i => rrd_uops(i).valid && rrd_uops(i).bits.sets_vcfg && !rrd_stall(i) }.orR
       ex_vcfg.get.bits := rrd_vcfg.get
+      ex_mtype := rrd_mtype
     }
     when (flush_rrd_ex) { ex_vcfg.get.valid := false.B }
 
-    when (ex_vcfg_out.get.valid) { mem_vcfg.get.bits := ex_vcfg_out.get.bits }
+    when (ex_vcfg_out.get.valid) { mem_vcfg.get.bits := ex_vcfg_out.get.bits; mem_mtype := ex_mtype_out }
     mem_vcfg.get.valid := ex_vcfg_out.get.valid && !flush_rrd_ex && !ex_stall
 
-    when (mem_vcfg.get.valid) { com_vcfg.get.bits := mem_vcfg.get.bits }
+    when (mem_vcfg.get.valid) { com_vcfg.get.bits := mem_vcfg.get.bits; com_mtype := mem_mtype }
     com_vcfg.get.valid := mem_vcfg.get.valid && !kill_mem
   }
 
@@ -176,6 +204,7 @@ class ShuttleCore(tile: ShuttleTile, edge: TLEdgeOut)(implicit p: Parameters) ex
       (usingSupervisor.option(new SDecode)) ++:
       (usingDebug.option(new DebugDecode)) ++:
       (usingVector.option(new VCFGDecode)) ++:
+      (usingZvt.option(new ZvtDecode)) ++:
       (usingNMI.option(new NMIDecode)) ++:
       Seq(new FenceIDecode(false)) ++:
       Seq(new ZbaDecode, new Zba64Decode, new ZbbDecode, new Zbb64Decode, new ZbsDecode) ++:
@@ -190,7 +219,8 @@ class ShuttleCore(tile: ShuttleTile, edge: TLEdgeOut)(implicit p: Parameters) ex
 
     l.bits.ctrl.decode(r.bits.inst, decode_table)
     l.bits.fp_ctrl := fp_decode(r.bits.inst)
-    l.bits.sets_vcfg := Seq(Instructions.VSETVLI, Instructions.VSETIVLI, Instructions.VSETVL).map(_ === r.bits.inst).orR && usingVector.B
+    l.bits.sets_vcfg := (Seq(Instructions.VSETVLI, Instructions.VSETIVLI, Instructions.VSETVL).map(_ === r.bits.inst).orR ||
+      (usingZvt.B && Zvt.isConfig(r.bits.inst))) && usingVector.B
     if (usingVector) {
       val vec_decoder = shuttleParams.vector.get.decoder(p)
       vec_decoder.io.inst := r.bits.inst
@@ -231,6 +261,24 @@ class ShuttleCore(tile: ShuttleTile, edge: TLEdgeOut)(implicit p: Parameters) ex
     csr.io.decode(i).inst := rrd_uops(i).bits.inst
   }
 
+  // Zvt checks (v0.4; others reserved and not checked): MS = Off for tile-state
+  // instructions; matmul with vstart != 0, an operand register outside the
+  // layout (vs mod 8 >= 8 / KMAX, vs not a multiple of LMUL) or a tile
+  // specifier not valid for the TEW; vtzero / vtbcast tile specifier; msettm /
+  // msettk with mtwiden = 0; vtdiscard with MS = Off or vtype.vill
+  def zvtIllegal(inst: UInt, i: Int): Bool = {
+    val vt = rrd_vcfg.get.vtype
+    val tewLog = vt.vsew +& rrd_mtype.twidenLog
+    val vstart = Mux(ex_vcfg.get.valid || mem_vcfg.get.valid || com_vcfg.get.valid, 0.U, csr.io.vector.get.vstart)
+    val matmul_bad = Zvt.MATMUL === inst && (vstart =/= 0.U ||
+      !Zvt.tileOk(Cat(inst(11, 9), 0.U(1.W)), tewLog) ||
+      !Zvt.operandOk(inst(19, 15), vt.vsew, vt.vlmul_sign, vt.vlmul_mag) ||
+      !Zvt.operandOk(inst(24, 20), vt.vsew, vt.vlmul_sign, vt.vlmul_mag))
+    val zero_bad = (Zvt.VTZERO === inst || Zvt.VTBCAST === inst) && !Zvt.tileOk(inst(11, 8), tewLog)
+    (Zvt.accessesTile(inst) && csr.io.decode(i).matrix_illegal) || matmul_bad || zero_bad ||
+      ((Zvt.MSETTM === inst || Zvt.MSETTK === inst) && rrd_mtype.mtwiden === 0.U) ||
+      (Zvt.VTDISCARD === inst && (csr.io.decode(i).matrix_illegal || vt.vill))
+  }
   val rrd_illegal_insn = Wire(Vec(retireWidth, Bool()))
   for (i <- 0 until retireWidth) {
     val uop = rrd_uops(i).bits
@@ -253,6 +301,7 @@ class ShuttleCore(tile: ShuttleTile, edge: TLEdgeOut)(implicit p: Parameters) ex
       (ctrl.rocc && csr.io.decode(i).rocc_illegal) ||
       (uop.sets_vcfg && csr.io.decode(0).vector_illegal) ||
       (ctrl.vec && (csr.io.decode(0).vector_illegal || rrd_vcfg.map(_.vtype.vill).getOrElse(true.B))) ||
+      (if (usingZvt) zvtIllegal(inst, i) else false.B) ||
       (csr_en && (csr_ren_illegal || csr_wen_illegal)) ||
       (!uop.rvc && ((sfence || system_insn) && csr.io.decode(i).system_illegal))
     )
@@ -528,10 +577,89 @@ class ShuttleCore(tile: ShuttleTile, edge: TLEdgeOut)(implicit p: Parameters) ex
       ),
       ex_setvcfg_uop.inst(19,15))
 
-    val ex_new_vl = ex_new_vtype.vl(ex_avl, ex_vcfg.get.bits.vl, false.B, false.B, false.B)
+    val ex_vset_vl = ex_new_vtype.vl(ex_avl, ex_vcfg.get.bits.vl, false.B, false.B, false.B)
+    // rd: the new vl (vset*, msettn), tm (msettm) or tk (msettk)
+    val ex_new_vl = WireInit(ex_vset_vl)
     when (ex_setvcfg_valid.orR) {
       ex_vcfg_out.get.bits.vtype := ex_new_vtype
-      ex_vcfg_out.get.bits.vl := ex_new_vl
+      ex_vcfg_out.get.bits.vl := ex_vset_vl
+      ex_mtype_out := 0.U.asTypeOf(new ZvtMType) // vset[i]vl[i] write mtype = 0
+    }
+    // Zvt v0.4 configuration instructions (msetmtype[i], msettn / tm / tk)
+    zvtTE.foreach { te =>
+      val inst   = ex_setvcfg_uop.inst
+      val rs1    = ex_setvcfg_uop.rs1_data
+      val cur_vt = ex_vcfg.get.bits.vtype
+      val cur_m  = ex_mtype
+      def minU(a: UInt, b: UInt): UInt = Mux(a < b, a, b)
+      // ETE for a TEW (log2 bytes)
+      def ete(tewLog: UInt): UInt = Mux(tewLog === 3.U, (te / 2).U, te.U)
+      val cur_ete = ete(cur_vt.vsew +& cur_m.twidenLog)
+      val is_mset  = Zvt.MSETMTYPE === inst || Zvt.MSETMTYPEI === inst
+      when (ex_setvcfg_valid.orR) {
+        when (is_mset) {
+          val imm = Zvt.MSETMTYPEI === inst
+          // msetmtypei: vtype.altfmt = inst[28], vsew = inst[24:23]; mtype.mtwiden = inst[16:15]
+          val raw_vt = Mux(imm, Cat(inst(28), 0.U(3.W), inst(24, 23), 0.U(3.W)), ex_setvcfg_uop.rs2_data)
+          val raw_m  = Mux(imm, inst(16, 15), rs1)
+          val vt = VType.fromUInt(raw_vt)
+          val m  = ZvtMType.fromCSR(raw_m)
+          val cfg_vt = WireInit(vt)
+          val cfg_m  = WireInit(m)
+          when (m.mtwiden =/= 0.U) {
+            val twLog  = m.twidenLog
+            val tewLog = vt.vsew +& twLog
+            val eteLog = Mux(tewLog === 3.U, (log2Ceil(te) - 1).U, log2Ceil(te).U)
+            val eveLog = log2Ceil(vLen).U -& 3.U -& vt.vsew
+            val kl     = Zvt.kmaxLog(vt.vsew)
+            // vlmul = log2(min(8 / KMAX, 8 / TWIDEN, ceil(ETE / EVE)))
+            val lmulLog = minU(minU(3.U -& kl, 3.U -& twLog), Mux(eteLog > eveLog, eteLog - eveLog, 0.U))
+            cfg_vt.vlmul_sign := false.B
+            cfg_vt.vlmul_mag  := lmulLog
+            cfg_vt.vta := true.B
+            cfg_vt.vma := true.B
+            cfg_vt.vill := vt.vill || tewLog > log2Ceil(eLen / 8).U
+            cfg_m.tk := minU(m.tk, 1.U << kl)
+            // LMUL * EVE = vlMax of the new vtype
+            val lmul_eve = 1.U << (eveLog +& lmulLog)
+            cfg_m.tm := minU(minU(m.tm, lmul_eve), ete(tewLog))
+          }
+          val new_vt = WireInit(cfg_vt)
+          val new_m  = WireInit(cfg_m)
+          when (cfg_vt.vill || m.mtwiden === 0.U) { new_m := 0.U.asTypeOf(new ZvtMType) }
+          when (cfg_vt.vill) {
+            new_vt := 0.U.asTypeOf(new VType)
+            new_vt.vill := true.B
+          }
+          ex_vcfg_out.get.bits.vtype := new_vt
+          ex_vcfg_out.get.bits.vl := 0.U
+          ex_mtype_out := new_m
+        }
+        when (Zvt.MSETTN === inst) {
+          // not configured: vsetvl semantics with the current vtype (rs1 = x0 is not special)
+          val vl = Mux(cur_m.mtwiden === 0.U,
+            cur_vt.vl(rs1, ex_vcfg.get.bits.vl, false.B, false.B, false.B),
+            minU(minU(rs1, cur_vt.vlMax), cur_ete))
+          ex_vcfg_out.get.bits.vtype := cur_vt
+          ex_vcfg_out.get.bits.vl := vl
+          ex_mtype_out := cur_m
+          ex_new_vl := vl
+        }
+        when (Zvt.MSETTM === inst) {
+          val tm = minU(minU(rs1, cur_vt.vlMax), cur_ete)
+          ex_vcfg_out.get.bits := ex_vcfg.get.bits
+          ex_mtype_out := cur_m
+          ex_mtype_out.tm := tm
+          ex_new_vl := tm
+        }
+        when (Zvt.MSETTK === inst) {
+          val tk = minU(rs1, 1.U << Zvt.kmaxLog(cur_vt.vsew))
+          ex_vcfg_out.get.bits := ex_vcfg.get.bits
+          ex_mtype_out := cur_m
+          ex_mtype_out.tk := tk
+          ex_new_vl := tk
+        }
+      }
     }
     Some(ex_new_vl)
   } else {
@@ -568,6 +696,7 @@ class ShuttleCore(tile: ShuttleTile, edge: TLEdgeOut)(implicit p: Parameters) ex
     v.satp := csr.io.ptbr
     v.ex.valid := ex_uops_reg(0).valid && (ex_uops_reg(0).bits.ctrl.vec || shuttleParams.vector.get.issueVConfig.B && ex_uops_reg(0).bits.sets_vcfg) && !ex_uops_reg(0).bits.xcpt
     v.ex.vconfig := ex_vcfg.get.bits
+    v.ex.mtype := ex_mtype
     v.ex.vstart := Mux(mem_vcfg.get.valid || com_vcfg.get.valid, 0.U, csr.io.vector.get.vstart)
     v.ex.fire := !ex_stall && !flush_rrd_ex
     v.ex.uop := ex_uops_reg(0).bits
@@ -992,6 +1121,13 @@ class ShuttleCore(tile: ShuttleTile, edge: TLEdgeOut)(implicit p: Parameters) ex
     v.set_vstart.valid := set_vcfg
     v.set_vstart.bits := 0.U
     v.set_vs_dirty := (com_retire zip com_uops_reg).map { case (r,u) => r && u.bits.ctrl.vec }.orR
+    // Zvt: mtype commits with the configuration; MS Dirty on a tile-state
+    // instruction (reads included: allowed), Initial on vtdiscard
+    mtypeCSR.foreach { c => c.set := set_vcfg; c.sdata := com_mtype.asCSR }
+    csr.io.zvt.foreach { z =>
+      z.set_ms_dirty := (com_retire zip com_uops_reg).map { case (r,u) => r && u.bits.ctrl.vec && Zvt.accessesTile(u.bits.inst) }.orR
+      z.set_ms_initial := (com_retire zip com_uops_reg).map { case (r,u) => r && Zvt.VTDISCARD === u.bits.inst }.orR
+    }
 
     val io_v = io.vector.get
     when (io_v.com.retire_late || io_v.com.xcpt) {

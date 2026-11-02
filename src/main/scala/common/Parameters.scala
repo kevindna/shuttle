@@ -17,7 +17,10 @@ case class ShuttleCoreVectorParams(
   vfh: Boolean,
   decoder: Parameters => RocketVectorDecoder,
   issueVConfig: Boolean,
-  vExts: Seq[String])
+  vExts: Seq[String],
+  // Zvt (matrix extension v0.4) with tile edge TE: the mtype CSR, the
+  // configuration instructions, vtdiscard and the tile-state checks
+  zvtTE: Option[Int] = None)
 
 
 case class ShuttleCoreParams(
