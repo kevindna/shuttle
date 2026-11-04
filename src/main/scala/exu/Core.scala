@@ -270,7 +270,10 @@ class ShuttleCore(tile: ShuttleTile, edge: TLEdgeOut)(implicit p: Parameters) ex
     val vt = rrd_vcfg.get.vtype
     val tewLog = vt.vsew +& rrd_mtype.twidenLog
     val vstart = Mux(ex_vcfg.get.valid || mem_vcfg.get.valid || com_vcfg.get.valid, 0.U, csr.io.vector.get.vstart)
-    val matmul_bad = Zvt.MATMUL === inst && (vstart =/= 0.U ||
+    // mixed 4b x 8b (MATMUL4): also only SEW = 8, TWIDEN = 4
+    val matmul4 = Zvt.MATMUL4 === inst
+    val matmul_bad = (Zvt.MATMUL === inst || matmul4) && (vstart =/= 0.U ||
+      (matmul4 && (vt.vsew =/= 0.U || rrd_mtype.mtwiden =/= 3.U)) ||
       !Zvt.tileOk(Cat(inst(11, 9), 0.U(1.W)), tewLog) ||
       !Zvt.operandOk(inst(19, 15), vt.vsew, vt.vlmul_sign, vt.vlmul_mag) ||
       !Zvt.operandOk(inst(24, 20), vt.vsew, vt.vlmul_sign, vt.vlmul_mag))

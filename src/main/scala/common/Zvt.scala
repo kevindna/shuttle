@@ -37,6 +37,12 @@ object Zvt {
   val MSETMTYPE  = BitPat("b1000010??????????111000001010111")
   // matrix arithmetic (OP-VE): vtfmm[.alt].tvv (funct3 001), vtmmu / vtmms.tvv (funct3 000)
   val MATMUL     = BitPat("b1111001??????????00????0?1110111")
+  // mixed 4b x 8b matmuls (not in the spec; the funct6 after the matmuls'):
+  // vs2 (A) 4-bit, vs1 (B) 8-bit (altfmt), SEW = 8, TWIDEN = 4 (TEW 32).
+  // funct3 000: vtmm4u / vtmm4s.tvv (bit 7: int4 A signed); funct3 001:
+  // vtfmm4.tvv (bit 7 = 0, E2M1 A) / vtfmmx4.tvv (bit 7 = 1, MXFP4 A).
+  // Legal only for the pairs the vector unit includes (its decoder)
+  val MATMUL4    = BitPat("b1111011??????????00????0?1110111")
   // vtle / vtse: nf = EEW, mew = 1, mop = 00, vm = 1, width = 111, vd / vs3 = 0
   val TILE_LS    = BitPat("b???1001??????????111000000?00111")
   // moves, tile zero, context discard (OP-V, OPMVX)
@@ -50,7 +56,7 @@ object Zvt {
 
   def isConfig(i: UInt): Bool = Seq(MSETTN, MSETTM, MSETTK, MSETMTYPEI, MSETMTYPE).map(_ === i).reduce(_ || _)
   // instructions that access the tile state (illegal with MS = Off, set MS Dirty)
-  def accessesTile(i: UInt): Bool = Seq(MATMUL, TILE_LS, VTMV_V_T, VTMV_T_V, VTZERO, VTBCAST).map(_ === i).reduce(_ || _)
+  def accessesTile(i: UInt): Bool = Seq(MATMUL, MATMUL4, TILE_LS, VTMV_V_T, VTMV_T_V, VTZERO, VTBCAST).map(_ === i).reduce(_ || _)
 
   // KMAX = 4 / 2 / 1 for SEW = 8 / 16 / >= 32: log2
   def kmaxLog(vsew: UInt): UInt = Mux(vsew === 0.U, 2.U, Mux(vsew === 1.U, 1.U, 0.U))
