@@ -265,7 +265,8 @@ class ShuttleCore(tile: ShuttleTile, edge: TLEdgeOut)(implicit p: Parameters) ex
   // instructions; matmul with vstart != 0, an operand register outside the
   // layout (vs mod 8 >= 8 / KMAX, vs not a multiple of LMUL) or a tile
   // specifier not valid for the TEW; vtzero / vtbcast tile specifier; msettm /
-  // msettk with mtwiden = 0; vtdiscard with MS = Off or vtype.vill
+  // msettk with mtwiden = 0; vtdiscard with MS = Off or vtype.vill; tile add
+  // (off-spec) with vstart != 0, TEW != 32 or a td / ts not valid for TEW 32
   def zvtIllegal(inst: UInt, i: Int): Bool = {
     val vt = rrd_vcfg.get.vtype
     val tewLog = vt.vsew +& rrd_mtype.twidenLog
@@ -278,7 +279,9 @@ class ShuttleCore(tile: ShuttleTile, edge: TLEdgeOut)(implicit p: Parameters) ex
       !Zvt.operandOk(inst(19, 15), vt.vsew, vt.vlmul_sign, vt.vlmul_mag) ||
       !Zvt.operandOk(inst(24, 20), vt.vsew, vt.vlmul_sign, vt.vlmul_mag))
     val zero_bad = (Zvt.VTZERO === inst || Zvt.VTBCAST === inst) && !Zvt.tileOk(inst(11, 8), tewLog)
-    (Zvt.accessesTile(inst) && csr.io.decode(i).matrix_illegal) || matmul_bad || zero_bad ||
+    val tadd_bad = Zvt.TADD === inst && (vstart =/= 0.U || tewLog =/= 2.U ||
+      !Zvt.tileOk(inst(11, 8), tewLog) || inst(19) || !Zvt.tileOk(inst(18, 15), tewLog))
+    (Zvt.accessesTile(inst) && csr.io.decode(i).matrix_illegal) || matmul_bad || zero_bad || tadd_bad ||
       ((Zvt.MSETTM === inst || Zvt.MSETTK === inst) && rrd_mtype.mtwiden === 0.U) ||
       (Zvt.VTDISCARD === inst && (csr.io.decode(i).matrix_illegal || vt.vill))
   }

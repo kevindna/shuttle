@@ -43,6 +43,11 @@ object Zvt {
   // vtfmm4.tvv (bit 7 = 0, E2M1 A) / vtfmmx4.tvv (bit 7 = 1, MXFP4 A).
   // Legal only for the pairs the vector unit includes (its decoder)
   val MATMUL4    = BitPat("b1111011??????????00????0?1110111")
+  // tile add (not in the spec; the funct6 after MATMUL4): vtadd.i32 /
+  // vtadd.f32 (funct3 000 / 001) td += ts element-wise over tm x tn, int32
+  // (wrapping) / FP32 (round to odd), TEW 32 only. rd = 2 * td, rs1 = ts,
+  // rs2 = 0. Legal only with Saturn's WithOPUTileAdd (its decoder)
+  val TADD       = BitPat("b111110100000?????00?????01110111")
   // vtle / vtse: nf = EEW, mew = 1, mop = 00, vm = 1, width = 111, vd / vs3 = 0
   val TILE_LS    = BitPat("b???1001??????????111000000?00111")
   // moves, tile zero, context discard (OP-V, OPMVX)
@@ -56,7 +61,7 @@ object Zvt {
 
   def isConfig(i: UInt): Bool = Seq(MSETTN, MSETTM, MSETTK, MSETMTYPEI, MSETMTYPE).map(_ === i).reduce(_ || _)
   // instructions that access the tile state (illegal with MS = Off, set MS Dirty)
-  def accessesTile(i: UInt): Bool = Seq(MATMUL, MATMUL4, TILE_LS, VTMV_V_T, VTMV_T_V, VTZERO, VTBCAST).map(_ === i).reduce(_ || _)
+  def accessesTile(i: UInt): Bool = Seq(MATMUL, MATMUL4, TADD, TILE_LS, VTMV_V_T, VTMV_T_V, VTZERO, VTBCAST).map(_ === i).reduce(_ || _)
 
   // KMAX = 4 / 2 / 1 for SEW = 8 / 16 / >= 32: log2
   def kmaxLog(vsew: UInt): UInt = Mux(vsew === 0.U, 2.U, Mux(vsew === 1.U, 1.U, 0.U))
